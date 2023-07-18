@@ -1,51 +1,92 @@
-import re
-import os
-import base64
-import requests
-from PIL import Image
-from io import BytesIO
-from urllib.parse import urlparse
-from bs4 import BeautifulSoup
-import sys
-import concurrent.futures
-import chardet
-import keyboard
 import argparse
 import logging
+import os
+import re
+import sys
+import signal
+import string
+import time
+
+from io import BytesIO
+from urllib.parse import urlparse
+
+import base64
+import chardet
+import concurrent.futures
+import requests
+
+from bs4 import BeautifulSoup
+from PIL import Image
 from pyfiglet import Figlet
 
-# 创建保存图像的文件夹
+# 程序配置
 OUTPUT_DIR = "output/images"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# 系统默认转义字符集
+escape_chars = re.escape(string.punctuation)
+
 # 配置日志记录
-logging.basicConfig(level=logging.INFO, filename='output/log.txt', filemode='w',
+logging.basicConfig(level=logging.INFO, filename='output/error.txt', filemode='w',
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
-# 定义一个全局标志变量，用于控制并发处理的终止
+# 数据处理相关常量
+ITEM_PATTERN = '<A.*?<\/A>'
+URL_PATTERN = r'<A\s+HREF="(.*?)"'
+ICON_PATTERN = r'ICON="data:image\/png;base64,([^"]+)"'
+TITLE_PATTERN = r'<A[^>]+>([^<]+)</A>'
+DEFAULT_ICON_FILE = 'assets/globe.png'
+
+# 用户配置
+MAX_WORKERS = 8  # 设置最大线程数
+
+# 网站图标尺寸设置
+IMAGE_WIDTH = 32
+IMAGE_HEIGHT = 32
+
+# 并发处理的终止标志符
 running = True
 
 
-def on_hotkey(event):
+def on_signal(signum, frame):
     global running
-    logging.info('中止并发处理和脚本')
     running = False
 
 
+def get_default_icon():
+    with open(DEFAULT_ICON_FILE, 'rb') as file:
+        icon_data = file.read()
+    icon = base64.b64encode(icon_data).decode('utf-8').replace('\n', '')
+    return icon
+
+
+def is_valid_protocol(item):
+    url = ''.join(re.findall(URL_PATTERN, item))
+    parsed_url = urlparse(url)
+    protocol = parsed_url.scheme
+    return protocol in ['http', 'https']
+
+
 def extract_data(text):
-    # 提取base64编码和A链接的标题
-    base64_pattern = r'ICON="data:image\/png;base64,([^"]+)"'
-    base64_matches = re.findall(base64_pattern, text)
-    base64_codes = [match for match in base64_matches]
+    item_text = re.findall(ITEM_PATTERN, text)
 
-    title_pattern = r'<DT><A[^>]+>([^<]+)</A>'
-    title_matches = re.findall(title_pattern, text)
-    titles = [match for match in title_matches]
+    result = {
+        i: {
+            'url': ''.join(re.findall(URL_PATTERN, item)),
+            'icon': ''.join(re.findall(ICON_PATTERN, item)) or get_default_icon(),
+            # 'title': ''.join(re.findall(TITLE_PATTERN, item))
 
-    return base64_codes, titles
+            # 添加字符转义
+            'title': re.sub(f"[{escape_chars}]", lambda x: "\\" + x.group(0), ''.join(re.findall(TITLE_PATTERN, item)))
+        }
+        for i, item in enumerate(item_text)
+        if is_valid_protocol(item)
+    }
+
+    return result
 
 
-def process_url(url, title, base64_code, output_dir, output_to_terminal, socks5_proxy):
+def process_url(url, icon, title, output_dir, silent_mode, proxy, username=None, password=None):
     try:
         # 根据标题生成文件名
         parsed_url = urlparse(url)
@@ -58,21 +99,31 @@ def process_url(url, title, base64_code, output_dir, output_to_terminal, socks5_
         output_dir = output_dir.replace("\\", "/")
 
         # 将base64编码解码为字节数据
-        image_data = base64.b64decode(base64_code)
+        image_data = base64.b64decode(icon)
 
         # 打开图像
         image = Image.open(BytesIO(image_data))
+
+        # 调整图像尺寸
+        resized_image = image.resize(
+            (IMAGE_WIDTH, IMAGE_HEIGHT), resample=Image.LANCZOS)
+
         # 保存图像到指定路径
         save_path = os.path.join(output_dir, f"{file_name}.png")
-        image.save(save_path)
+        resized_image.save(save_path)
 
         # 发送 GET 请求获取页面内容
         proxies = {
-            'http': 'socks5://' + socks5_proxy,
-            'https': 'socks5://' + socks5_proxy
+            'http': proxy,
+            'https': proxy
         }
 
-        response = requests.get(url, proxies=proxies, timeout=10)
+        if proxy.startswith('socks'):
+            proxies['http'] = 'socks5h://' + proxy[len('socks5://'):]
+            proxies['https'] = 'socks5h://' + proxy[len('socks5://'):]
+
+        response = requests.get(url, proxies=proxies,
+                                timeout=10, auth=(username, password))
         encoding = chardet.detect(response.content)['encoding']
 
         if encoding is None:
@@ -86,95 +137,77 @@ def process_url(url, title, base64_code, output_dir, output_to_terminal, socks5_
 
         # 提取描述（description）
         description = ''
+        newline = os.linesep
         for tag in meta_tags:
             if 'name' in tag.attrs and tag.attrs['name'].lower() == 'description':
-                description = tag.attrs['content'].encode('utf-8')  # 先将字节对象解码为字符串对象
-                description = description.decode('utf-8').replace("\n", "")  # 解码后按照字符串处理
+                description = tag.attrs['content']
                 if len(description) > 30:
                     description = description[:30] + "..."
+                description = description.replace("\r\n", newline).replace(
+                    "\n", newline).replace("\r", newline)
+                description = re.sub(
+                    f"[{escape_chars}]", lambda x: "\\" + x.group(0), description)
                 break
 
-        # # 将描述信息编码为utf-8并解码为字符串
-        description = description.encode('utf-8', errors='ignore').decode('utf-8')
-
-        # 输出到终端和日志
-        if output_to_terminal:
-            print(f"- name: '{title}'")
+        # 输出到终端
+        if not silent_mode:
+            print(f"  name: \"{title}\"")
             print(f"  url: {url}")
             print(f"  img: /images/logos/{file_name}.png")
-            print(f"  description: '{description}'")
-
-        logging.info(f"- name: '{title}'")
-        logging.info(f"  url: {url}")
-        logging.info(f"  img: /images/logos/{file_name}.png")
-        logging.info(f"  description: '{description}'")
+            print(f"  description: \"{description}\"\n")
 
         # 写入结果到文件
-        with open('output/result.txt', 'a', encoding='utf-8') as output_file:
-            output_file.write(f"- name: '{title}'\n")
+        time.sleep(0.1)
+        with open('output/result.txt', 'a', encoding='utf-8', buffering=1024) as output_file:
+            output_file.write(f"- name: \"{title}\"\n")
             output_file.write(f"  url: {url}\n")
             output_file.write(f"  img: /images/logos/{file_name}.png\n")
-            output_file.write(f"  description: '{description}'\n")
+            output_file.write(f"  description: \"{description}\"\n")
 
     except Exception as e:
-        # 如果发生异常，将异常信息写入文件和日志
-        logging.error(f"- name: '{title}'")
-        logging.error(f"  url: {url}")
-        logging.error(f"  img: /images/logos/{file_name}.png")
-        logging.error(f"  error: '{str(e)}'")
-
-        with open('output/error.txt', 'a', encoding='utf-8') as error_file:
-            error_file.write(f"- name: '{title}'\n")
-            error_file.write(f"  url: {url}\n")
-            error_file.write(f"  img: /images/logos/{file_name}.png\n")
-            error_file.write(f"  error: '{str(e)}'\n")
+        # 如果发生异常，将异常信息写入日志
+        logging.error(str(e))
 
 
-def main(file_name, output_to_terminal, socks5_proxy):
+def main(file_name, silent_mode, proxy, username=None, password=None):
     with open(file_name, "r", encoding="utf-8") as file:
         content = file.read()
 
-    # 使用正则表达式提取以'<A HREF="'开头的行
-    bookmark_lines = re.findall(r'<A HREF="(.*?)"', content)
+    data = extract_data(content)
 
-    # 过滤不符合条件的URL
-    filtered_urls = [url for url in bookmark_lines if url.startswith(("http://", "https://"))]
-
-    # 提取base64编码和A链接的标题
-    base64_codes, titles = extract_data(content)
+    # 注册中止信号处理程序
+    signal.signal(signal.SIGINT, on_signal)
 
     # 并发处理所有URL
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         # 将每个URL提交给线程池处理
         futures = [
-            executor.submit(process_url, url, title, base64_code, OUTPUT_DIR, output_to_terminal, socks5_proxy)
-            for url, title, base64_code in zip(filtered_urls, titles, base64_codes)
+            executor.submit(process_url, data[i]['url'], data[i]['icon'], data[i]
+                            ['title'], OUTPUT_DIR, silent_mode, proxy, username, password)
+            for i in data.keys()
         ]
 
-        # 注册中止热键事件
-        keyboard.add_hotkey('ctrl+c', on_hotkey, args=('event',))  # 添加args参数来传递事件对象
-
         # 迭代访问已完成的任务，同时检查中止标志
-        for future in concurrent.futures.as_completed(futures, timeout=600):  # 设置超时时间为600秒
+        # 设置超时时间为600秒
+        for future in concurrent.futures.as_completed(futures, timeout=600):
             if not running:
                 executor.shutdown(wait=False)  # 终止线程池中正在运行的任务
-                break
+                sys.exit()
             try:
                 future.result()  # 获取任务的结果，检查是否有异常
             except Exception as e:
                 logging.error(f"Error occurred: {str(e)}")
 
-        # 停止监听键盘事件
-        keyboard.unhook_all()
-
-    logging.info("处理完成！")
-
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="处理书签文件")
-    parser.add_argument("file_name", type=str, nargs="?", default="", help="要处理的书签文件名")
-    parser.add_argument("-o", "--output", action="store_true", help="输出到终端")
-    parser.add_argument("-p", "--proxy", type=str, default="", help="指定代理服务器")
+    parser = argparse.ArgumentParser(description="处理书签文件", add_help=False)
+    parser.add_argument("file_name", type=str, nargs="?",
+                        default="", help="要处理的书签文件名")
+    parser.add_argument("-h", "--help", action="store_true", help="显示帮助文档")
+    parser.add_argument(
+        "-s", "--silent", action="store_true", help="静默模式，不将信息输出到终端")
+    parser.add_argument("-p", "--proxy", type=str, default="",
+                        help="指定代理服务器，格式：[SCHEME://]PROXY:PORT [USERNAME] [PASSWORD]（不填写协议则默认为socks5）")
     args = parser.parse_args()
 
     if args.file_name == "":
@@ -188,4 +221,17 @@ if __name__ == "__main__":
         print("文件不存在！")
         sys.exit(1)
 
-    main(args.file_name, args.output, args.proxy)
+    if args.proxy and "://" not in args.proxy:
+        # 如果代理服务器协议为空，并且没有指定协议，则默认使用 SOCKS 协议
+        args.proxy = f"socks5://{args.proxy}"
+
+    proxy = args.proxy.split(" ")
+    proxy_address = proxy[0]
+    username = None
+    password = None
+
+    if len(proxy) >= 3:
+        username = proxy[1]
+        password = proxy[2]
+
+    main(args.file_name, args.silent, proxy_address, username, password)
