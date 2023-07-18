@@ -4,7 +4,6 @@ import os
 import re
 import sys
 import signal
-import string
 import time
 
 from io import BytesIO
@@ -23,11 +22,8 @@ from pyfiglet import Figlet
 OUTPUT_DIR = "output/images"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# 系统默认转义字符集
-escape_chars = re.escape(string.punctuation)
-
 # 配置日志记录
-logging.basicConfig(level=logging.INFO, filename='output/error.txt', filemode='w',
+logging.basicConfig(level=logging.INFO, filename='output/log.txt', filemode='w',
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
 # 数据处理相关常量
@@ -74,10 +70,7 @@ def extract_data(text):
         i: {
             'url': ''.join(re.findall(URL_PATTERN, item)),
             'icon': ''.join(re.findall(ICON_PATTERN, item)) or get_default_icon(),
-            # 'title': ''.join(re.findall(TITLE_PATTERN, item))
-
-            # 添加字符转义
-            'title': re.sub(f"[{escape_chars}]", lambda x: "\\" + x.group(0), ''.join(re.findall(TITLE_PATTERN, item)))
+            'title': ''.join(re.findall(TITLE_PATTERN, item)).replace('"', '\\"')
         }
         for i, item in enumerate(item_text)
         if is_valid_protocol(item)
@@ -143,10 +136,8 @@ def process_url(url, icon, title, output_dir, silent_mode, proxy, username=None,
                 description = tag.attrs['content']
                 if len(description) > 30:
                     description = description[:30] + "..."
-                description = description.replace("\r\n", newline).replace(
+                description = description.replace('"', '\\"').replace("\r\n", newline).replace(
                     "\n", newline).replace("\r", newline)
-                description = re.sub(
-                    f"[{escape_chars}]", lambda x: "\\" + x.group(0), description)
                 break
 
         # 输出到终端
@@ -165,8 +156,12 @@ def process_url(url, icon, title, output_dir, silent_mode, proxy, username=None,
             output_file.write(f"  description: \"{description}\"\n")
 
     except Exception as e:
-        # 如果发生异常，将异常信息写入日志
-        logging.error(str(e))
+        # 如果发生异常，将异常信息写入文件
+        with open('output/error.txt', 'a', encoding='utf-8') as error_file:
+            error_file.write(f"- name: \"{title}\"\n")
+            error_file.write(f"  url: {url}\n")
+            error_file.write(f"  img: /images/logos/{file_name}.png\n")
+            error_file.write(f"  erroe: \"{str(e)}\"\n")
 
 
 def main(file_name, silent_mode, proxy, username=None, password=None):
