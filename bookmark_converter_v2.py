@@ -2,29 +2,25 @@ import argparse
 import logging
 import os
 import re
+import csv
 import sys
 import signal
-import time
+import shutil
+import concurrent.futures
+import requests
+import base64
+import chardet
 
 from io import BytesIO
 from urllib.parse import urlparse
-
-import base64
-import chardet
-import concurrent.futures
-import requests
-
 from bs4 import BeautifulSoup
 from PIL import Image
 from pyfiglet import Figlet
+from enum import Enum
 
-# 程序配置
-OUTPUT_DIR = "output/images"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# 配置日志记录
-logging.basicConfig(level=logging.INFO, filename='output/log.txt', filemode='w',
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+# 输出目录配置
+OUTPUT_DIR = "output"
+IMAGES_DIR = "/images/logos"
 
 # 数据处理相关常量
 ITEM_PATTERN = '<A.*?<\/A>'
@@ -33,12 +29,20 @@ ICON_PATTERN = r'ICON="data:image\/png;base64,([^"]+)"'
 TITLE_PATTERN = r'<A[^>]+>([^<]+)</A>'
 DEFAULT_ICON_FILE = 'assets/globe.png'
 
+# 导出文件设置
+CSV_HEADER = ['name', 'url', 'img', 'description']
+
 # 用户配置
 MAX_WORKERS = 8  # 设置最大线程数
 
 # 网站图标尺寸设置
 IMAGE_WIDTH = 32
 IMAGE_HEIGHT = 32
+
+# 导出模式
+# 0 txt
+# 1 csv
+export_mode = 0
 
 # 并发处理的终止标志符
 running = True
@@ -70,13 +74,27 @@ def extract_data(text):
         i: {
             'url': ''.join(re.findall(URL_PATTERN, item)),
             'icon': ''.join(re.findall(ICON_PATTERN, item)) or get_default_icon(),
-            'title': ''.join(re.findall(TITLE_PATTERN, item)).replace('"', '\\"')
+            'title': ''.join(re.findall(TITLE_PATTERN, item))
         }
         for i, item in enumerate(item_text)
         if is_valid_protocol(item)
     }
 
     return result
+
+
+def export_to_output(data):
+    export_functions = {
+        0: (export_to_text, "txt"),
+        1: (export_to_csv, "csv")
+    }
+
+    if export_mode in export_functions:
+        export_function, file_extension = export_functions[export_mode]
+        export_function(data, f"{OUTPUT_DIR}/result.{file_extension}")
+    else:
+        print("导出错误。")
+        sys.exit(1)
 
 
 def process_url(url, icon, title, output_dir, silent_mode, proxy, username=None, password=None):
@@ -136,35 +154,36 @@ def process_url(url, icon, title, output_dir, silent_mode, proxy, username=None,
                 description = tag.attrs['content']
                 if len(description) > 30:
                     description = description[:30] + "..."
-                description = description.replace('"', '\\"').replace("\r\n", newline).replace(
+                description = description.replace("\r\n", newline).replace(
                     "\n", newline).replace("\r", newline)
                 break
 
+        data = {
+            'name': title,
+            'url': url,
+            'img': f"{IMAGES_DIR}/{file_name}.png",
+            'description': description
+        }
+
+        export_to_output(data)
+
         # 输出到终端
         if not silent_mode:
-            print(f"  name: \"{title}\"")
-            print(f"  url: {url}")
-            print(f"  img: /images/logos/{file_name}.png")
-            print(f"  description: \"{description}\"\n")
-
-        # 写入结果到文件
-        time.sleep(0.1)
-        with open('output/result.txt', 'a', encoding='utf-8', buffering=1024) as output_file:
-            output_file.write(f"- name: \"{title}\"\n")
-            output_file.write(f"  url: {url}\n")
-            output_file.write(f"  img: /images/logos/{file_name}.png\n")
-            output_file.write(f"  description: \"{description}\"\n")
+            print(f"  name: \"{data['name']}\"")
+            print(f"  url: {data['url']}")
+            print(f"  img: {data['img']}")
+            print(f"  description: \"{data['description']}\"\n")
 
     except Exception as e:
         # 如果发生异常，将异常信息写入文件
-        with open('output/error.txt', 'a', encoding='utf-8') as error_file:
+        with open(f"{OUTPUT_DIR}/error.txt", 'a', encoding='utf-8') as error_file:
             error_file.write(f"- name: \"{title}\"\n")
             error_file.write(f"  url: {url}\n")
-            error_file.write(f"  img: /images/logos/{file_name}.png\n")
-            error_file.write(f"  erroe: \"{str(e)}\"\n")
+            error_file.write(f"  img: {IMAGES_DIR}/{file_name}.png\n")
+            error_file.write(f"  error: \"{str(e)}\"\n")
 
 
-def main(file_name, silent_mode, proxy, username=None, password=None):
+def process_data(file_name, silent_mode, proxy, username=None, password=None):
     with open(file_name, "r", encoding="utf-8") as file:
         content = file.read()
 
@@ -178,7 +197,7 @@ def main(file_name, silent_mode, proxy, username=None, password=None):
         # 将每个URL提交给线程池处理
         futures = [
             executor.submit(process_url, data[i]['url'], data[i]['icon'], data[i]
-                            ['title'], OUTPUT_DIR, silent_mode, proxy, username, password)
+                            ['title'], OUTPUT_DIR + IMAGES_DIR, silent_mode, proxy, username, password)
             for i in data.keys()
         ]
 
@@ -193,16 +212,66 @@ def main(file_name, silent_mode, proxy, username=None, password=None):
             except Exception as e:
                 logging.error(f"Error occurred: {str(e)}")
 
+    print("任务完成。")
+    logging.info(f"任务完成。")
+
+
+def export_to_csv(data, file_name, custom_header=CSV_HEADER):
+    # 检查文件是否为空
+    is_file_empty = not os.path.exists(
+        file_name) or os.path.getsize(file_name) == 0
+
+    # 转换数据类型为列表
+    data = [data]
+
+    # 写入数据
+    with open(file_name, mode="a", newline="", buffering=1024) as csvfile:
+        # 创建写入器对象
+        writer = csv.writer(csvfile)
+
+        # 写入表头
+        if is_file_empty:
+            writer.writerow(custom_header)
+
+        # 写入数据
+        for item in data:
+            row = [item.get(key, '') for key in custom_header]
+            writer.writerow(row)
+
+
+def export_to_text(data, file_name):
+    with open(file_name, 'a', encoding='utf-8', buffering=1024) as textfile:
+        # textfile.write(f"- name: \"{data['name']}\"\n")
+        # textfile.write(f"  description: \"{data['description']}\"\n")
+
+        # 输出时转义双引号
+        textfile.write(
+            "-  name: \"{}\"\n".format(data['name'].replace('"', '\\"')))
+        textfile.write(f"  url: {data['url']}\n")
+        textfile.write(f"  img: {data['img']}\n")
+        textfile.write("  description: \"{}\"\n".format(
+            data['description'].replace('"', '\\"')))
+
+
+def remove_existing_files():
+    # 检查并删除images/logos文件夹
+    if os.path.exists("output"):
+        shutil.rmtree("output")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="处理书签文件", add_help=False)
     parser.add_argument("file_name", type=str, nargs="?",
                         default="", help="要处理的书签文件名")
+    parser.add_argument("-o", "--output", type=str, default='txt',
+                        help="输出的文件格式，目前支持 txt，csv（默认txt文本文件）")
     parser.add_argument("-h", "--help", action="store_true", help="显示帮助文档")
     parser.add_argument(
         "-s", "--silent", action="store_true", help="静默模式，不将信息输出到终端")
     parser.add_argument("-p", "--proxy", type=str, default="",
                         help="指定代理服务器，格式：[SCHEME://]PROXY:PORT [USERNAME] [PASSWORD]（不填写协议则默认为socks5）")
+    parser.add_argument("-k", "--keep", action="store_true",
+                        help="保留上一次的结果")
     args = parser.parse_args()
 
     if args.file_name == "":
@@ -216,17 +285,40 @@ if __name__ == "__main__":
         print("文件不存在！")
         sys.exit(1)
 
+    if args.output == 'txt':
+        export_mode = 0
+    elif args.output == 'csv':
+        export_mode = 1
+    else:
+        print("不支持的文件类型。")
+        sys.exit(1)
+
     if args.proxy and "://" not in args.proxy:
         # 如果代理服务器协议为空，并且没有指定协议，则默认使用 SOCKS 协议
         args.proxy = f"socks5://{args.proxy}"
+
+    if not args.keep:
+        remove_existing_files()
 
     proxy = args.proxy.split(" ")
     proxy_address = proxy[0]
     username = None
     password = None
 
+    if args.help:
+        parser.print_help()
+        sys.exit(0)
+
     if len(proxy) >= 3:
         username = proxy[1]
         password = proxy[2]
 
-    main(args.file_name, args.silent, proxy_address, username, password)
+    # 创建输出目录
+    os.makedirs(OUTPUT_DIR + IMAGES_DIR, exist_ok=True)
+
+    # 配置日志记录
+    logging.basicConfig(level=logging.INFO, filename=f"{OUTPUT_DIR}/log.txt",
+                        filemode='a', format='%(asctime)s - %(levelname)s - %(message)s')
+
+    process_data(args.file_name, args.silent,
+                 proxy_address, username, password)
