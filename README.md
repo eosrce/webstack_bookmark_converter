@@ -78,7 +78,6 @@ options:
 
 ## 开发计划 Development project
 
-- [x] 输出`csv`格式支持。
 - [ ] 适配 Linux 系统环境。
 - [ ] 通过第三方 API 获取站点图标。
 - [ ] 添加参数选项，选择是否需要联网获取站点介绍。
