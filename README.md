@@ -28,7 +28,7 @@
 
 - 书签（收藏夹）数据导入到 Webstack。
 - 支持 Webstack Hexo版本。
-- 计划支持 csv 格式。
+- 支持导出 csv 格式。
 - 获取书签中站点的介绍文本（建议配合代理使用）。
 - 根据书签中保存的站点图标的 Base64 数据还原成图标文件（但分辨率较低）。
 
@@ -53,7 +53,7 @@ cmd > python .\bookmark_converter_v2.py
 \____/\____/_/ /_/|___/\___/_/   \__/\___/_/
 
 
-usage: bookmark_converter_v2.py [-o OUTPUT] [-h] [-s] [-p PROXY] [-k] [file_name]
+usage: bookmark_converter_v2.py [-o OUTPUT] [-h] [-s] [-p PROXY] [-k] [-t] [file_name]
 
 处理书签文件
 
@@ -62,19 +62,21 @@ positional arguments:
 
 options:
   -o OUTPUT, --output OUTPUT
-                        输出的文件格式，目前支持 txt，csv（默认txt文本文件）
+                        输出的文件格式，目前支持 txt，csv，yml
   -h, --help            显示帮助文档
   -s, --silent          静默模式，不将信息输出到终端
   -p PROXY, --proxy PROXY
-                        指定代理服务器，格式：[SCHEME://]PROXY:PORT [USERNAME] [PASSWORD]（不填写协 议则默认为socks5）
+                        指定代理服务器，格式：[SCHEME://]PROXY:PORT [USERNAME] [PASSWORD]（不填写协议则默认为socks5）
   -k, --keep            保留上一次的结果
+  -t, --template        输出 Webstack Hexo 版本配置文件，模板文件为assets/_config.example.yml
 ```
 
 ## 已知问题 Known issues
 
-- [ ] 添加仅输出网站图标的功能，用于重新生成其他尺寸的图标。
+- [ ] 添加控制是否输出网站图标的功能。
 - [ ] 提取`description`时可能存在问题。
 - [ ] 数据的输出顺序存在 bug。
+- [ ] 输出 CSV 格式有待优化。
 
 ## 开发计划 Development project
 

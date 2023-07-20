@@ -10,6 +10,7 @@ import concurrent.futures
 import requests
 import base64
 import chardet
+import tempfile
 
 from io import BytesIO
 from urllib.parse import urlparse
@@ -31,6 +32,7 @@ DEFAULT_ICON_FILE = 'assets/globe.png'
 
 # 导出文件设置
 CSV_HEADER = ['name', 'url', 'img', 'description']
+GLOBAL_ENCODING = 'utf-8'
 
 # 用户配置
 MAX_WORKERS = 8  # 设置最大线程数
@@ -38,6 +40,9 @@ MAX_WORKERS = 8  # 设置最大线程数
 # 网站图标尺寸设置
 IMAGE_WIDTH = 32
 IMAGE_HEIGHT = 32
+
+# 临时文件输出
+global_temp_file = None
 
 # 导出模式
 # 0 txt
@@ -86,12 +91,21 @@ def extract_data(text):
 def export_to_output(data):
     export_functions = {
         0: (export_to_text, "txt"),
-        1: (export_to_csv, "csv")
+        1: (export_to_csv, "csv"),
+        2: (export_to_yaml, "yaml"),
+        3: (export_to_template, "yaml")
     }
 
     if export_mode in export_functions:
         export_function, file_extension = export_functions[export_mode]
-        export_function(data, f"{OUTPUT_DIR}/result.{file_extension}")
+
+        if export_mode == 3:
+            template_name = "assets/_config.example.yml"
+            file_name = f"{OUTPUT_DIR}/webstack.{file_extension}"
+            export_function(data, file_name, template_name)
+        else:
+            file_name = f"{OUTPUT_DIR}/result.{file_extension}"
+            export_function(data, file_name)
     else:
         print("导出错误。")
         sys.exit(1)
@@ -141,7 +155,17 @@ def process_url(url, icon, title, output_dir, silent_mode, proxy, username=None,
             encoding = 'utf-8'  # 使用默认编码作为备选方案
 
         response.encoding = encoding
-        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # 创建临时文件
+        create_temp_file()
+        if global_temp_file:
+            # 保存网页内容到临时文件
+            global_temp_file.write(response.text)
+            global_temp_file.seek(0)
+
+            # 打开临时文件，并将文件句柄传递给BeautifulSoup
+            with open(global_temp_file.name, 'r') as file:
+                soup = read_temp_file(file.name)
 
         # 提取 <head> 中的 <meta> 标签
         meta_tags = soup.find_all('meta')
@@ -212,7 +236,6 @@ def process_data(file_name, silent_mode, proxy, username=None, password=None):
             except Exception as e:
                 logging.error(f"Error occurred: {str(e)}")
 
-    print("任务完成。")
     logging.info(f"任务完成。")
 
 
@@ -225,7 +248,7 @@ def export_to_csv(data, file_name, custom_header=CSV_HEADER):
     data = [data]
 
     # 写入数据
-    with open(file_name, mode="a", newline="", buffering=1024) as csvfile:
+    with open(file_name, 'a', newline="", buffering=1024) as csvfile:
         # 创建写入器对象
         writer = csv.writer(csvfile)
 
@@ -253,10 +276,63 @@ def export_to_text(data, file_name):
             data['description'].replace('"', '\\"')))
 
 
+def export_to_yaml(data, file_name):
+    with open(file_name, 'a', encoding='utf-8', buffering=1024) as textfile:
+        # textfile.write(f"- name: \"{data['name']}\"\n")
+        # textfile.write(f"  description: \"{data['description']}\"\n")
+
+        # 输出时转义双引号
+        textfile.write(
+            "  -  name: \"{}\"\n".format(data['name'].replace('"', '\\"')))
+        textfile.write(f"    url: {data['url']}\n")
+        textfile.write(f"    img: {data['img']}\n")
+        textfile.write("    description: \"{}\"\n".format(
+            data['description'].replace('"', '\\"')))
+
+
+def generate_templates(template_name):
+    with open(template_name, 'r', encoding='utf-8') as template:
+        ''
+
+
+def export_to_template(data, file_name):
+    with open(file_name, 'a', encoding='utf-8', buffering=1024) as textfile:
+        if "bookmark_converter:":
+            # 输出时转义双引号
+            textfile.write(
+                "  -  name: \"{}\"\n".format(data['name'].replace('"', '\\"')))
+            textfile.write(f"    url: {data['url']}\n")
+            textfile.write(f"    img: {data['img']}\n")
+            textfile.write("    description: \"{}\"\n".format(
+                data['description'].replace('"', '\\"')))
+
+
 def remove_existing_files():
     # 检查并删除images/logos文件夹
     if os.path.exists("output"):
         shutil.rmtree("output")
+
+
+def create_temp_file():
+    global global_temp_file
+    global_temp_file = tempfile.NamedTemporaryFile(mode='w+', delete=False, encoding='utf-8')
+
+
+def close_temp_file():
+    global global_temp_file
+    if global_temp_file:
+        global_temp_file.close()
+        global_temp_file = None
+
+
+def read_temp_file(temp_file_path):
+    try:
+        with open(temp_file_path, 'r', encoding='utf-8') as file:
+            soup = BeautifulSoup(file, 'html.parser')
+            return soup
+    except IOError as e:
+        print(f"Error while reading the file: {e}")
+        return None
 
 
 if __name__ == "__main__":
@@ -264,7 +340,7 @@ if __name__ == "__main__":
     parser.add_argument("file_name", type=str, nargs="?",
                         default="", help="要处理的书签文件名")
     parser.add_argument("-o", "--output", type=str, default='txt',
-                        help="输出的文件格式，目前支持 txt，csv（默认txt文本文件）")
+                        help="输出的文件格式，目前支持 txt，csv，yml")
     parser.add_argument("-h", "--help", action="store_true", help="显示帮助文档")
     parser.add_argument(
         "-s", "--silent", action="store_true", help="静默模式，不将信息输出到终端")
@@ -272,6 +348,8 @@ if __name__ == "__main__":
                         help="指定代理服务器，格式：[SCHEME://]PROXY:PORT [USERNAME] [PASSWORD]（不填写协议则默认为socks5）")
     parser.add_argument("-k", "--keep", action="store_true",
                         help="保留上一次的结果")
+    parser.add_argument("-t", "--template", action="store_true",
+                        help="输出 Webstack Hexo 版本配置文件，模板文件为assets/_config.example.yml")
     args = parser.parse_args()
 
     if args.file_name == "":
@@ -289,13 +367,28 @@ if __name__ == "__main__":
         export_mode = 0
     elif args.output == 'csv':
         export_mode = 1
+    elif args.output == 'yaml':
+        export_mode = 2
     else:
         print("不支持的文件类型。")
         sys.exit(1)
 
+    if args.output and args.template:
+        print("请勿同时指定 -o 和 -t 参数")
+        sys.exit(1)
+
+    elif not args.output and args.template:
+        # 生成模板文件到 output 文件夹下
+        export_mode = 3
+        generate_templates()
+
     if args.proxy and "://" not in args.proxy:
         # 如果代理服务器协议为空，并且没有指定协议，则默认使用 SOCKS 协议
         args.proxy = f"socks5://{args.proxy}"
+
+    if args.help:
+        parser.print_help()
+        sys.exit(0)
 
     if not args.keep:
         remove_existing_files()
@@ -304,10 +397,6 @@ if __name__ == "__main__":
     proxy_address = proxy[0]
     username = None
     password = None
-
-    if args.help:
-        parser.print_help()
-        sys.exit(0)
 
     if len(proxy) >= 3:
         username = proxy[1]
@@ -320,5 +409,11 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, filename=f"{OUTPUT_DIR}/log.txt",
                         filemode='a', format='%(asctime)s - %(levelname)s - %(message)s')
 
+    # 数据处理部分
     process_data(args.file_name, args.silent,
                  proxy_address, username, password)
+
+    print("程序运行结束。")
+
+    # 解析完成后删除临时文件
+    close_temp_file()
